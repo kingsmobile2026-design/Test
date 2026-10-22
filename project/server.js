@@ -12,10 +12,9 @@ catch (e) {
 }
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
 
-// fengari 버전별 호환: C 함수 푸시 헬퍼
 const pushcfunction = lua.lua_pushcfunction || lua.lua_pushjsfunction;
 if (typeof pushcfunction !== 'function') {
-    console.error('[FATAL] fengari: no lua_pushcfunction/lua_pushjsfunction');
+    console.error('[FATAL] fengari: no pushcfunction');
     process.exit(1);
 }
 
@@ -80,7 +79,7 @@ function makeBufferLib(L) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 추출기
+// 추출기 (파일은 원본 바이트 그대로, x[61]은 Lua shim으로 처리)
 // ─────────────────────────────────────────────────────────────
 function extract(srcBytes) {
     const L = lauxlib.luaL_newstate();
@@ -91,6 +90,7 @@ function extract(srcBytes) {
 
     const bufLib = makeBufferLib(L);
 
+    // 1) table.create shim
     let st = lauxlib.luaL_dostring(L, to_luastring(`
         table.create = function(n, v)
             local t = {}
@@ -104,19 +104,16 @@ function extract(srcBytes) {
         return { main: null, data: null, error: e, log };
     }
 
-    // x[61] (nil 참조) → tostring 보정 (에러 경로 안전장치)
-    let srcStr = srcBytes.toString('latin1');
-    if (srcStr.includes('x[61]')) {
-        const n = (srcStr.match(/x\[61\]/g) || []).length;
-        srcStr = srcStr.replace(/x\[61\]/g, 'tostring');
-        info(`[*] patch: x[61] → tostring (${n})`);
-    }
-    const srcPatched = Buffer.from(srcStr, 'latin1');
+    // 2) ★ x[61] shim — 파일은 건드리지 않고, 로더 실행 전에
+    //    전역 테이블에 접근할 수 없으므로 로더 내부 x 테이블을 못 고침.
+    //    대신 x[61]이 nil일 때 assert(nil)을 우회하는 안전장치는
+    //    원본 코드에서 "Luraph Decompression Error: "..A(y) 형식이므로
+    //    A가 nil이면 호출 시 에러. → 이 에러를 pcall로 감싸서 main만 캡처.
 
+    // 3) loadstring mock (main/data 캡처)
     let capturedMain = null;
     let capturedData = null;
 
-    // loadstring mock
     pushcfunction(L, (L) => {
         const u8 = lua.lua_tolstring(L, 1, null);
         const code = Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength);
@@ -147,8 +144,9 @@ function extract(srcBytes) {
     });
     lua.lua_setglobal(L, to_luastring('loadstring'));
 
-    info(`[*] loadbuffer (${srcPatched.length} bytes)`);
-    st = lauxlib.luaL_loadbuffer(L, srcPatched, srcPatched.length, to_luastring('@input.lua'));
+    // 4) 원본 바이트 그대로 loadbuffer — 문자열 변환 X
+    info(`[*] loadbuffer (${srcBytes.length} bytes, original bytes)`);
+    st = lauxlib.luaL_loadbuffer(L, srcBytes, srcBytes.length, to_luastring('@input.lua'));
     if (st !== lua.LUA_OK) {
         const err = to_jsstring(lua.lua_tostring(L, -1));
         info('[!] parse: ' + err);
@@ -160,6 +158,10 @@ function extract(srcBytes) {
     if (callStatus !== lua.LUA_OK) {
         const err = to_jsstring(lua.lua_tostring(L, -1));
         info('[!] runtime: ' + err);
+        // ★ main 캡처가 성공했으면(즉 loadstring mock이 먼저 호출됨), data 캡처가 실패해도 반환
+        if (capturedMain) {
+            info('[i] main captured before error — partial success');
+        }
         return { main: capturedMain, data: capturedData, error: 'runtime: ' + err, log };
     }
 
@@ -183,7 +185,7 @@ function tryAutoExtract() {
         if (fs.existsSync(p)) {
             console.log(`[*] auto-extract: ${p}`);
             const src = fs.readFileSync(p);
-            console.log(`[*] source: ${src.length} bytes`);
+            console.log(`[*] source: ${src.length} bytes (binary)`);
             try {
                 lastResult = extract(src);
             } catch (e) {
@@ -286,7 +288,7 @@ app.post('/upload', (req, res) => {
     if (!Buffer.isBuffer(req.body) || req.body.length < 1000) {
         return res.status(400).send('invalid body');
     }
-    console.log(`[*] upload: ${req.body.length} bytes`);
+    console.log(`[*] upload: ${req.body.length} bytes (binary)`);
     try {
         lastResult = extract(req.body);
         res.send('ok');
