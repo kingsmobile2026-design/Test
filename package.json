@@ -1,0 +1,16 @@
+{
+  "name": "luraph-extract",
+  "version": "1.0.0",
+  "description": "Luraph v15.1 loader extractor (fengari)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "fengari": "^0.1.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
